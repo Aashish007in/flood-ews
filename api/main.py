@@ -456,9 +456,56 @@ async def get_flood_warnings():
 # Without retries, every probe can fail at once → overlays silently vanish.
 _OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
+# Secondary upstream: MET Norway Locationforecast — keyless, free, and does not
+# block datacenter IPs (Open-Meteo answers Render's egress with blanket 429s).
+# MET requires an identifying User-Agent per their terms of use.
+_MET_URL = "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+_MET_HEADERS = {
+    "User-Agent": "FloodguardAI/0.3 flood-ews (github.com/Aashish007in/flood-ews)",
+    "Accept": "application/json",
+}
+
+
+async def _fetch_met_norway(client: httpx.AsyncClient, lat, lon, params: dict):
+    """MET Norway fallback. Returns (open-meteo-shaped data, error)."""
+    try:
+        resp = await client.get(_MET_URL, params={"lat": lat, "lon": lon}, headers=_MET_HEADERS)
+        if resp.status_code != 200:
+            return None, f"HTTP {resp.status_code}"
+        ts = resp.json()["properties"]["timeseries"]
+    except httpx.RequestError:
+        return None, "request error (timeout/network)"
+    except (KeyError, ValueError):
+        return None, "malformed payload"
+
+    times, pressures, winds, precip = [], [], [], []
+    for entry in ts:
+        instant = entry.get("data", {}).get("instant", {}).get("details", {})
+        nxt = entry.get("data", {}).get("next_1_hours", {}).get("details", {})
+        times.append(entry.get("time", ""))
+        pressures.append(instant.get("air_pressure_at_sea_level"))
+        w = instant.get("wind_speed")  # m/s in MET → km/h like Open-Meteo
+        winds.append(round(w * 3.6, 1) if w is not None else None)
+        precip.append(nxt.get("precipitation_amount"))
+
+    # Only expose the variables the caller actually asked Open-Meteo for
+    wanted = set((params.get("hourly") or "").split(","))
+    hourly = {}
+    if "pressure_msl" in wanted:
+        hourly["pressure_msl"] = pressures
+    if "wind_speed_10m" in wanted:
+        hourly["wind_speed_10m"] = winds
+    if "precipitation" in wanted:
+        hourly["precipitation"] = precip
+    return {"hourly": hourly}, None
+
 
 async def _fetch_open_meteo(client: httpx.AsyncClient, params: dict, retries: int = 2):
-    """Fetch Open-Meteo with retry/backoff. Returns (data, error)."""
+    """Fetch Open-Meteo with retry/backoff. Returns (data, error).
+
+    If Open-Meteo keeps failing (e.g. its datacenter-IP block), transparently
+    falls back to MET Norway and normalizes the payload to the same shape.
+    """
     last_err = None
     for attempt in range(retries + 1):
         try:
@@ -473,6 +520,14 @@ async def _fetch_open_meteo(client: httpx.AsyncClient, params: dict, retries: in
             last_err = "request error (timeout/network)"
         if attempt < retries:
             await asyncio.sleep(0.6 * (2 ** attempt))
+
+    # Upstream exhausted → try MET Norway before giving up
+    lat, lon = params.get("latitude"), params.get("longitude")
+    if lat is not None and lon is not None:
+        data, met_err = await _fetch_met_norway(client, lat, lon, params)
+        if data is not None:
+            return data, None
+        last_err = f"{last_err} → MET {met_err}"
     return None, last_err
 
 
