@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS observations (
 CREATE INDEX IF NOT EXISTS idx_obs_station   ON observations (station_id);
 CREATE INDEX IF NOT EXISTS idx_obs_time      ON observations (observed_at);
 CREATE INDEX IF NOT EXISTS idx_obs_geom      ON observations USING GIST (geom);
+-- Dedupe guard: each ingest run backfills the last 48h, so the same
+-- (station, hour) is inserted repeatedly. Requires deduping any existing
+-- duplicate rows before this index can be created (see DEPLOY notes).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_obs_station_time ON observations (station_id, observed_at);
 
 -- Rainfall forecasts (gridded polygons)
 CREATE TABLE IF NOT EXISTS rainfall_forecasts (

@@ -1263,3 +1263,92 @@ body {
   background: var(--accent);
   color: #fff;
 }
+
+/* ── Inundation district-station dropdown ─────────────────────────────── */
+
+.ze-station-select {
+  position: relative;
+  margin: 6px 0 2px 26px;
+}
+
+.ze-station-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  color: #e5e7eb;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.ze-station-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ze-station-arrow {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.ze-station-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 1200;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #141826;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+}
+
+.ze-station-group {
+  padding: 6px 8px 2px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b93a7;
+}
+
+.ze-station-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #e5e7eb;
+  cursor: pointer;
+}
+
+.ze-station-option:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.ze-station-option input[type='radio'] {
+  accent-color: #3b82f6;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.ze-station-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ze-station-basin {
+  margin-left: auto;
+  font-size: 10px;
+  color: #8b93a7;
+}

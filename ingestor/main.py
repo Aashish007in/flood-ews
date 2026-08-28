@@ -22,11 +22,14 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 
 def get_conn():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
 
 
-def ingest_city(cur, city_key: str):
-    """Fetch from Open-Meteo for one city and insert into observations."""
+def ingest_city(cur, city_key: str) -> int:
+    """Fetch from Open-Meteo for one city and insert into observations.
+
+    Returns the number of rows staged for insert.
+    """
     city = CITIES[city_key]
     lat, lon = city["lat"], city["lon"]
     station_id = f"open-meteo-{city_key}"
@@ -65,27 +68,50 @@ def ingest_city(cur, city_key: str):
         log.info("  [%s] Inserted/skipped %d rows", city_key, len(values))
     else:
         log.warning("  [%s] No valid rows to insert", city_key)
+    return len(values)
 
 
-def ingest():
-    """Fetch from Open-Meteo for ALL cities and upsert into observations."""
+def ingest() -> bool:
+    """Fetch from Open-Meteo for ALL cities and upsert into observations.
+
+    Returns True only if the DB write succeeded and at least one city
+    produced rows — callers (GitHub Actions) rely on this to fail loudly.
+    """
     log.info("Starting ingestion cycle for %d cities …", len(CITIES))
+
     try:
         conn = get_conn()
-        cur = conn.cursor()
+    except Exception:
+        log.exception("Could not connect to database — ingestion aborted")
+        return False
+    cur = conn.cursor()
 
-        for city_key in CITIES:
-            try:
-                ingest_city(cur, city_key)
-            except Exception:
-                log.exception("  [%s] Failed — skipping", city_key)
+    ok_cities: list[str] = []
+    failed_cities: list[str] = []
+    total_rows = 0
+    for city_key in CITIES:
+        try:
+            total_rows += ingest_city(cur, city_key)
+            ok_cities.append(city_key)
+        except Exception as e:
+            log.exception("  [%s] Failed — skipping (%s)", city_key, e)
+            failed_cities.append(city_key)
 
+    try:
         conn.commit()
+    except Exception:
+        log.exception("Commit failed — no data persisted")
+        conn.rollback()
+        return False
+    finally:
         cur.close()
         conn.close()
-        log.info("Ingestion cycle complete.")
-    except Exception:
-        log.exception("Ingestion cycle failed")
+
+    log.info(
+        "Ingestion cycle complete: %d rows from %d/%d cities (failed: %s)",
+        total_rows, len(ok_cities), len(CITIES), failed_cities or "none",
+    )
+    return total_rows > 0 and not failed_cities
 
 
 def main():
@@ -93,8 +119,8 @@ def main():
 
     # One-shot mode: `python main.py --once` (used by free GitHub Actions cron)
     if "--once" in sys.argv:
-        ingest()
-        return
+        ok = ingest()
+        sys.exit(0 if ok else 1)
 
     # Run immediately on startup
     ingest()

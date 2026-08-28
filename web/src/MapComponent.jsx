@@ -36,6 +36,17 @@ const SEVERITY_COLORS = { SEVERE: '#a855f7', HIGH: '#f97316', MODERATE: '#facc15
 
 const GAUGE_STATUS_COLORS = { NORMAL: '#22c55e', WARNING: '#facc15', DANGER: '#f97316', EXTREME: '#ef4444' };
 
+// Great-circle distance in km — used to filter inundation cells around a station
+const haversineKm = (lat1, lon1, lat2, lon2) => {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+};
+
 export default function MapComponent({ onWardSelect, selectedWard, wards = [], layer, onLayerChange }) {
   const mapRef = useRef(null);
   const baseSatRef = useRef(null);
@@ -56,6 +67,7 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
   const [frameIdx, setFrameIdx] = useState(-1);
   const [playing, setPlaying] = useState(false);
   const [cyclones, setCyclones] = useState([]);
+  const [cyclonesStale, setCyclonesStale] = useState(false);
   const [wdData, setWdData] = useState(null);
   const [toast, setToast] = useState(null);
   const [panelOpen, setPanelOpen] = useState(true);
@@ -67,6 +79,10 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
   const [historyOn, setHistoryOn] = useState(false);
   const [historyDays, setHistoryDays] = useState(7);
   const [gaugeCount, setGaugeCount] = useState(0);
+  const [stations, setStations] = useState([]);
+  const [selectedStation, setSelectedStation] = useState('all');
+  const [stationMenuOpen, setStationMenuOpen] = useState(false);
+  const stationsRef = useRef([]);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -194,6 +210,7 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
         const data = await res.json();
         const systems = data.systems || [];
         setCyclones(systems);
+        setCyclonesStale(!!data.stale);
 
         cycloneLayerRef.current.clearLayers();
         if (!cyclonesOn) return;
@@ -363,7 +380,20 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
         const geojson = await res.json();
         inundationLayerRef.current.clearLayers();
         if (!inundationOn) return;
-        L.geoJSON(geojson, {
+
+        // When a district station is picked in the dropdown, only show
+        // inundation cells in that station's canal area (25 km radius)
+        const sel = stationsRef.current.find(s => s.station_id === selectedStation) || null;
+        const features = sel && geojson?.features
+          ? geojson.features.filter(f => {
+              const c = f.geometry?.coordinates;
+              if (!c) return false;
+              return haversineKm(c[1], c[0], sel.lat, sel.lon) <= 25;
+            })
+          : (geojson?.features || []);
+        const filtered = { type: 'FeatureCollection', features };
+
+        L.geoJSON(filtered, {
           style: f => {
             const d = f.properties.depth_m;
             let color = '#3b82f6';
@@ -372,7 +402,7 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
             return { fillColor: color, fillOpacity: 0.8, color: '#60a5fa', weight: 1 };
           },
           onEachFeature: (f, lyr) =>
-            lyr.bindPopup(`<div class="ze-popup"><b>Inundation Warning</b><br/>Depth: ${f.properties.depth_m.toFixed(2)} m</div>`),
+            lyr.bindPopup(`<div class="ze-popup"><b>Inundation Warning</b>${sel ? `<br/><b>District station:</b> ${sel.name}` : ''}<br/>Depth: ${f.properties.depth_m.toFixed(2)} m</div>`),
         }).addTo(inundationLayerRef.current);
       } catch (e) {
         console.error('Failed to fetch flood warnings', e);
@@ -381,7 +411,7 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
     fetchFloodWarnings();
     const t = setInterval(fetchFloodWarnings, 2 * 60_000);
     return () => clearInterval(t);
-  }, [inundationOn]);
+  }, [inundationOn, selectedStation]);
 
   /* ── Jal Shakti / CWC river gauge stations ───────────────────────────── */
   useEffect(() => {
@@ -391,6 +421,8 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
         if (!res.ok) return;
         const data = await res.json();
         const stations = data.jal_shakti_stations || [];
+        stationsRef.current = stations;
+        setStations(stations);
         setGaugeCount(stations.length);
 
         gaugesLayerRef.current.clearLayers();
@@ -523,6 +555,30 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
     }
   };
 
+  // District-wise station grouping for the Inundation dropdown
+  const stationGroups = useMemo(() => {
+    const map = new Map();
+    stations.forEach(s => {
+      const key = s.state || 'Other';
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(s);
+    });
+    return Array.from(map.entries())
+      .map(([state, sts]) => ({ state, stations: sts }))
+      .sort((a, b) => a.state.localeCompare(b.state));
+  }, [stations]);
+
+  const selectedStationObj = stations.find(s => s.station_id === selectedStation) || null;
+
+  const pickStation = (id) => {
+    setSelectedStation(id);
+    setStationMenuOpen(false);
+    if (id !== 'all') {
+      const s = stationsRef.current.find(x => x.station_id === id);
+      if (s && mapRef.current) mapRef.current.flyTo([s.lat, s.lon], 11, { duration: 0.8 });
+    }
+  };
+
   const renderLayerItem = (item, group) => {
     const active = layer === item.id;
     return (
@@ -580,6 +636,54 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
                 {o.count > 0 && <span className="ze-count">{o.count}</span>}
               </label>
             ))}
+            {inundationOn && (
+              <div className="ze-station-select">
+                <button
+                  type="button"
+                  className="ze-station-btn"
+                  onClick={() => setStationMenuOpen(o => !o)}
+                >
+                  <span>
+                    📍 {selectedStationObj ? selectedStationObj.name : 'All district stations'}
+                  </span>
+                  <span className="ze-station-arrow">{stationMenuOpen ? '▾' : '▸'}</span>
+                </button>
+                {stationMenuOpen && (
+                  <div className="ze-station-menu">
+                    <label className="ze-station-option">
+                      <input
+                        type="radio"
+                        name="inundation-station"
+                        checked={selectedStation === 'all'}
+                        onChange={() => pickStation('all')}
+                      />
+                      <span>All districts</span>
+                    </label>
+                    {stationGroups.map(g => (
+                      <div key={g.state}>
+                        <div className="ze-station-group">{g.state}</div>
+                        {g.stations.map(s => (
+                          <label key={s.station_id} className="ze-station-option">
+                            <input
+                              type="radio"
+                              name="inundation-station"
+                              checked={selectedStation === s.station_id}
+                              onChange={() => pickStation(s.station_id)}
+                            />
+                            <span
+                              className="ze-station-dot"
+                              style={{ background: GAUGE_STATUS_COLORS[s.status] || '#9ca3b8' }}
+                            />
+                            <span>{s.name}</span>
+                            <span className="ze-station-basin">{s.river_basin}</span>
+                          </label>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {historyOn && (
               <div className="ze-history-range">
@@ -675,6 +779,7 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
         <div className="ze-cyclone-banner">
           <span className="ze-banner-spin">🌀</span>
           {cyclones.length} cyclonic system{cyclones.length > 1 ? 's' : ''} tracked — strongest: {cyclones[0].category} ({cyclones[0].max_wind_kmh} km/h, {cyclones[0].basin})
+          {cyclonesStale && <span style={{ fontWeight: 400, opacity: 0.85 }}> · last known data (live scan unavailable)</span>}
         </div>
       )}
 

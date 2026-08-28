@@ -45,13 +45,17 @@ export default function App() {
     const wardData = allWards.find(w => w.ward_name === selectedWard)
     const cityParam = wardData ? `&city=${encodeURIComponent(wardData.city)}` : ''
 
+    // each fetch resolves to parsed JSON or null — a failed/HTML 502 response
+    // from one endpoint must never blank out the other's data
+    const safeJson = (r) => (r.ok ? r.json() : null)
+
     Promise.all([
-      fetch(`${API_BASE}/api/timeseries/${encodeURIComponent(selectedWard)}?${cityParam}`).then(r => r.json()),
-      fetch(`${API_BASE}/api/forecast/${encodeURIComponent(selectedWard)}`).then(r => r.json())
+      fetch(`${API_BASE}/api/timeseries/${encodeURIComponent(selectedWard)}?${cityParam}`).then(safeJson).catch(() => null),
+      fetch(`${API_BASE}/api/forecast/${encodeURIComponent(selectedWard)}`).then(safeJson).catch(() => null)
     ])
       .then(([dbData, forecastData]) => {
-        const observed = dbData.filter(d => d.kind === 'observed')
-        const forecast = (forecastData.hourly_series || []).map(d => ({
+        const observed = (dbData || []).filter(d => d.kind === 'observed')
+        const forecast = (forecastData?.hourly_series || []).map(d => ({
           time: d.time,
           rainfall_mm: d.precipitation,
           kind: 'forecast'

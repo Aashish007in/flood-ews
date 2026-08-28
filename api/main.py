@@ -228,6 +228,8 @@ async def get_timeseries(ward: str, city: str = Query(default=None)):
 
 # ── GET /api/forecast/{zone_name} → Open-Meteo proxy with caching ─────────────
 _cache = {}
+_upstream_cache = {}   # short-TTL cache for cyclone / WD scans
+_last_good = {}        # last known-good payloads for stale fallback
 
 @app.get("/api/forecast/{zone_name}")
 async def get_forecast(zone_name: str):
@@ -322,7 +324,8 @@ async def get_cyclone():
     peak_lat = 13.08
     peak_lon = 80.27
     
-    async with httpx.AsyncClient() as client:
+    # TIMEOUT ADDED to prevent server hangs (same fix as /api/forecast)
+    async with httpx.AsyncClient(timeout=10.0) as client:
         for p in points:
             params = {
                 "latitude": p["lat"],
@@ -331,7 +334,10 @@ async def get_cyclone():
                 "forecast_days": 5,
                 "timezone": "auto"
             }
-            resp = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
+            try:
+                resp = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
+            except httpx.RequestError:
+                continue  # skip unreachable point instead of hanging the route
             if resp.status_code == 200:
                 data = resp.json().get("hourly", {})
                 pressures = data.get("pressure_msl", [])
@@ -445,9 +451,42 @@ async def get_flood_warnings():
         return JSONResponse(content=row[0])
 
 
+# ── Open-Meteo helper: retry/backoff + error capture ─────────────────────────
+# Open-Meteo rate-limits/throttles datacenter IPs (e.g. Render's shared egress).
+# Without retries, every probe can fail at once → overlays silently vanish.
+_OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+
+
+async def _fetch_open_meteo(client: httpx.AsyncClient, params: dict, retries: int = 2):
+    """Fetch Open-Meteo with retry/backoff. Returns (data, error)."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            resp = await client.get(_OPEN_METEO_URL, params=params)
+            if resp.status_code == 200:
+                return resp.json(), None
+            last_err = f"HTTP {resp.status_code}"
+            # Retry only transient failures; give up immediately on 4xx (bad params etc.)
+            if resp.status_code not in (429, 500, 502, 503, 504):
+                break
+        except httpx.RequestError:
+            last_err = "request error (timeout/network)"
+        if attempt < retries:
+            await asyncio.sleep(0.6 * (2 ** attempt))
+    return None, last_err
+
+
 # ── GET /api/cyclones → multi-basin cyclone scan (N. Indian Ocean + NW Pacific)
 @app.get("/api/cyclones")
 async def get_cyclones():
+    now = time.time()
+
+    # Serve fresh cache (10 min TTL) — the frontend polls every 10 min and this
+    # avoids re-hitting Open-Meteo with 14 concurrent probes on every poll.
+    cached = _upstream_cache.get("cyclones")
+    if cached and now - cached["ts"] < 600:
+        return JSONResponse(content=cached["data"])
+
     points = [
         # Bay of Bengal
         {"lat": 13.08, "lon": 80.27, "basin": "Bay of Bengal"},
@@ -468,7 +507,7 @@ async def get_cyclones():
         {"lat": 22.00, "lon": 128.00, "basin": "NW Pacific"},
     ]
 
-    async def probe(p):
+    async def probe(client, p):
         params = {
             "latitude": p["lat"],
             "longitude": p["lon"],
@@ -476,31 +515,29 @@ async def get_cyclones():
             "forecast_days": 5,
             "timezone": "UTC",
         }
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
-            if resp.status_code != 200:
-                return None
-            hourly = resp.json().get("hourly", {})
-            pressures = [x for x in hourly.get("pressure_msl", []) if x is not None]
-            winds = [x for x in hourly.get("wind_speed_10m", []) if x is not None]
-            if not pressures or not winds:
-                return None
-            return {
-                "lat": p["lat"], "lon": p["lon"], "basin": p["basin"],
-                "min_pressure": round(min(pressures), 1),
-                "max_wind_kmh": round(max(winds), 1),
-            }
-        except Exception:
-            return None
+        data, err = await _fetch_open_meteo(client, params)
+        if data is None:
+            return None, err
+        hourly = data.get("hourly", {})
+        pressures = [x for x in hourly.get("pressure_msl", []) if x is not None]
+        winds = [x for x in hourly.get("wind_speed_10m", []) if x is not None]
+        if not pressures or not winds:
+            return None, "empty hourly payload"
+        return {
+            "lat": p["lat"], "lon": p["lon"], "basin": p["basin"],
+            "min_pressure": round(min(pressures), 1),
+            "max_wind_kmh": round(max(winds), 1),
+        }, None
 
-    results = await asyncio.gather(*(probe(p) for p in points))
+    errors = []
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        results = await asyncio.gather(*(probe(client, p) for p in points))
 
     candidates = []
-    for r in results:
-        if not r:
-            continue
-        if r["max_wind_kmh"] >= 40 or r["min_pressure"] <= 1000:
+    for r, err in results:
+        if err:
+            errors.append(err)
+        if r and (r["max_wind_kmh"] >= 40 or r["min_pressure"] <= 1000):
             candidates.append(r)
 
     # Sort strongest first, then de-duplicate systems within ~6 degrees of each other
@@ -519,12 +556,36 @@ async def get_cyclones():
                 category, severity = "Depression", "WATCH"
             systems.append({**c, "category": category, "threat_level": severity})
 
-    return JSONResponse(content={"count": len(systems), "systems": systems})
+    payload = {"count": len(systems), "systems": systems}
+    if errors:
+        payload["probe_errors"] = {"count": len(errors), "sample": errors[0]}
+
+    if systems:
+        _last_good["cyclones"] = {"ts": now, "data": payload}
+    _upstream_cache["cyclones"] = {"ts": now, "data": payload}
+
+    # Every probe failed → serve last-known-good (≤6h old) so the map overlays
+    # and alert banner persist instead of silently disappearing.
+    if not any(r for r, _ in results):
+        last = _last_good.get("cyclones")
+        if last and now - last["ts"] < 6 * 3600:
+            out = dict(last["data"])
+            out["stale"] = True
+            return JSONResponse(content=out)
+
+    return JSONResponse(content=payload)
 
 
 # ── GET /api/western-disturbances → WD scan along Mediterranean→Himalaya track
 @app.get("/api/western-disturbances")
 async def get_western_disturbances():
+    now = time.time()
+
+    # Serve fresh cache (10 min TTL) — avoids re-hitting Open-Meteo on every poll
+    cached = _upstream_cache.get("wd")
+    if cached and now - cached["ts"] < 600:
+        return JSONResponse(content=cached["data"])
+
     track = [
         {"lat": 37.0, "lon": 55.0, "name": "Caspian approach"},
         {"lat": 36.0, "lon": 62.0, "name": "Afghanistan"},
@@ -536,7 +597,7 @@ async def get_western_disturbances():
         {"lat": 28.5, "lon": 81.0, "name": "W. Nepal / UP"},
     ]
 
-    async def probe(p):
+    async def probe(client, p):
         params = {
             "latitude": p["lat"],
             "longitude": p["lon"],
@@ -544,39 +605,54 @@ async def get_western_disturbances():
             "forecast_days": 3,
             "timezone": "UTC",
         }
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
-            if resp.status_code != 200:
-                return None
-            hourly = resp.json().get("hourly", {})
-            pressures = [x for x in hourly.get("pressure_msl", []) if x is not None]
-            winds = [x for x in hourly.get("wind_speed_10m", []) if x is not None]
-            precip = [x for x in hourly.get("precipitation", []) if x is not None]
-            if not pressures or not winds:
-                return None
-            return {
-                "lat": p["lat"], "lon": p["lon"], "name": p["name"],
-                "min_pressure": round(min(pressures), 1),
-                "max_wind_kmh": round(max(winds), 1),
-                "precip_next_24h": round(sum(precip[:24]), 1) if precip else 0.0,
-            }
-        except Exception:
-            return None
+        data, err = await _fetch_open_meteo(client, params)
+        if data is None:
+            return None, err
+        hourly = data.get("hourly", {})
+        pressures = [x for x in hourly.get("pressure_msl", []) if x is not None]
+        winds = [x for x in hourly.get("wind_speed_10m", []) if x is not None]
+        precip = [x for x in hourly.get("precipitation", []) if x is not None]
+        if not pressures or not winds:
+            return None, "empty hourly payload"
+        return {
+            "lat": p["lat"], "lon": p["lon"], "name": p["name"],
+            "min_pressure": round(min(pressures), 1),
+            "max_wind_kmh": round(max(winds), 1),
+            "precip_next_24h": round(sum(precip[:24]), 1) if precip else 0.0,
+        }, None
 
-    results = await asyncio.gather(*(probe(p) for p in track))
-    nodes = [r for r in results if r]
+    errors = []
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        results = await asyncio.gather(*(probe(client, p) for p in track))
+    nodes = [r for r, _ in results if r]
     # A node is "active" if it shows a low-pressure / windy / wet signature
     active = [
         r for r in nodes
         if r["min_pressure"] <= 1008 or r["max_wind_kmh"] >= 30 or r["precip_next_24h"] >= 1
     ]
 
-    return JSONResponse(content={
+    payload = {
         "track": nodes,
         "active": active,
         "count": len(active),
-    })
+    }
+    if errors:
+        payload["probe_errors"] = {"count": len(errors), "sample": errors[0]}
+
+    if nodes:
+        _last_good["wd"] = {"ts": now, "data": payload}
+    _upstream_cache["wd"] = {"ts": now, "data": payload}
+
+    # Every probe failed → serve last-known-good (≤6h old) so the WD track
+    # and sidebar count persist instead of silently disappearing.
+    if not nodes:
+        last = _last_good.get("wd")
+        if last and now - last["ts"] < 6 * 3600:
+            out = dict(last["data"])
+            out["stale"] = True
+            return JSONResponse(content=out)
+
+    return JSONResponse(content=payload)
 
 
 # ── GET /api/inundation/history → 7-day historical inundation records ────────

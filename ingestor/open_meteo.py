@@ -48,6 +48,8 @@ def fetch_hourly_data(city_key: str) -> list[dict]:
         "latitude": city["lat"],
         "longitude": city["lon"],
         "hourly": "precipitation,soil_moisture_0_to_7cm",
+        "past_days": "2",   # backfill the last 48h so missed cron runs self-heal
+        "forecast_days": "1",
         "timezone": city["tz"],
     }
 
@@ -61,6 +63,8 @@ def fetch_hourly_data(city_key: str) -> list[dict]:
         "latitude": city["lat"],
         "longitude": city["lon"],
         "daily": "river_discharge",
+        "past_days": "2",
+        "forecast_days": "1",
         "timezone": city["tz"],
     }
     flood_resp = httpx.get(FLOOD_API_URL, params=flood_params, timeout=30)
