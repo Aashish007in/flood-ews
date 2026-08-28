@@ -4,6 +4,7 @@ import MapComponent from './MapComponent.jsx'
 import ModelSpreadChart from './ModelSpreadChart.jsx'
 import InundationChart from './InundationChart.jsx'
 import AlertStats from './AlertStats.jsx'
+import CapAlertBanner from './CapAlertBanner.jsx'
 
 const RISK_ORDER = { SEVERE: 0, HIGH: 1, MODERATE: 2, LOW: 3 }
 
@@ -102,6 +103,9 @@ export default function App() {
         layer={layer}
         onLayerChange={setLayer}
       />
+
+      {/* ── CAP emergency alert banner (top-center, above all map layers) ── */}
+      <CapAlertBanner />
 
       {/* ── Slide-in dashboard drawer ──────────────────────────── */}
       {selectedWard && dashboardOpen && (

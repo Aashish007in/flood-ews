@@ -34,6 +34,8 @@ const OWM_LAYERS = {
 
 const SEVERITY_COLORS = { SEVERE: '#a855f7', HIGH: '#f97316', MODERATE: '#facc15', WATCH: '#22c55e' };
 
+const GAUGE_STATUS_COLORS = { NORMAL: '#22c55e', WARNING: '#facc15', DANGER: '#f97316', EXTREME: '#ef4444' };
+
 export default function MapComponent({ onWardSelect, selectedWard, wards = [], layer, onLayerChange }) {
   const mapRef = useRef(null);
   const baseSatRef = useRef(null);
@@ -44,6 +46,8 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
   const inundationLayerRef = useRef(null);
   const cycloneLayerRef = useRef(null);
   const wdLayerRef = useRef(null);
+  const gaugesLayerRef = useRef(null);
+  const historyLayerRef = useRef(null);
 
   const cityBoundsRef = useRef({});
   const wardCentersRef = useRef({});
@@ -59,6 +63,10 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
   const [inundationOn, setInundationOn] = useState(true);
   const [cyclonesOn, setCyclonesOn] = useState(true);
   const [wdOn, setWdOn] = useState(true);
+  const [gaugesOn, setGaugesOn] = useState(true);
+  const [historyOn, setHistoryOn] = useState(false);
+  const [historyDays, setHistoryDays] = useState(7);
+  const [gaugeCount, setGaugeCount] = useState(0);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -84,6 +92,8 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
     inundationLayerRef.current = L.layerGroup().addTo(map);
     cycloneLayerRef.current = L.layerGroup().addTo(map);
     wdLayerRef.current = L.layerGroup().addTo(map);
+    gaugesLayerRef.current = L.layerGroup().addTo(map);
+    historyLayerRef.current = L.layerGroup().addTo(map);
 
     // Custom attribution bar
     const attrib = L.control({ position: 'bottomleft' });
@@ -373,6 +383,90 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
     return () => clearInterval(t);
   }, [inundationOn]);
 
+  /* ── Jal Shakti / CWC river gauge stations ───────────────────────────── */
+  useEffect(() => {
+    const fetchGauges = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/alerts/stats`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const stations = data.jal_shakti_stations || [];
+        setGaugeCount(stations.length);
+
+        gaugesLayerRef.current.clearLayers();
+        if (!gaugesOn) return;
+
+        const trendArrow = { RISING: '▲', FALLING: '▼', STEADY: '▬' };
+
+        stations.forEach(s => {
+          const color = GAUGE_STATUS_COLORS[s.status] || '#9ca3b8';
+          L.circleMarker([s.lat, s.lon], {
+            radius: 7,
+            color: '#fff',
+            weight: 2,
+            fillColor: color,
+            fillOpacity: 0.95,
+          })
+            .bindTooltip(
+              `<div class="gauge-tooltip">
+                <h4>💧 ${s.name}</h4>
+                <div><b>Basin:</b> ${s.river_basin} · ${s.state}</div>
+                <div><b>Water level:</b> ${s.water_level_m} m ${trendArrow[s.trend] || ''}</div>
+                <div><b>Warning level:</b> ${s.warning_level_m} m</div>
+                <div><b>Danger level:</b> ${s.danger_level_m} m</div>
+                <div class="gauge-status" style="color:${color}">${s.status} · ${s.trend} — ${s.agency}</div>
+              </div>`,
+              { direction: 'top', className: 'gauge-tooltip-wrap', opacity: 1 }
+            )
+            .addTo(gaugesLayerRef.current);
+        });
+      } catch (e) {
+        console.error('Failed to fetch river gauges', e);
+      }
+    };
+    fetchGauges();
+    const t = setInterval(fetchGauges, 10 * 60_000);
+    return () => clearInterval(t);
+  }, [gaugesOn]);
+
+  /* ── Historical inundation polygons (date-range selectable) ──────────── */
+  useEffect(() => {
+    const fetchHistory = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/inundation/history?days=${historyDays}`);
+        if (!res.ok) return;
+        const geojson = await res.json();
+        historyLayerRef.current.clearLayers();
+        if (!historyOn) return;
+        L.geoJSON(geojson, {
+          style: f => {
+            const d = f.properties.depth_m || 0;
+            let color = '#94a3b8';
+            if (d >= 0.3 && d < 0.8) color = '#a78bfa';
+            else if (d >= 0.8 && d < 1.5) color = '#8b5cf6';
+            else if (d >= 1.5) color = '#6d28d9';
+            return { fillColor: color, fillOpacity: 0.55, color, weight: 1, dashArray: '3 4' };
+          },
+          onEachFeature: (f, lyr) => {
+            const p = f.properties;
+            lyr.bindPopup(`
+              <div class="ze-popup">
+                <h4 style="margin:0 0 4px;">📜 Historical Inundation</h4>
+                ${p.ward_name ? `<div><b>Ward:</b> ${p.ward_name}, ${p.city}</div>` : ''}
+                <div><b>Depth:</b> ${p.depth_m != null ? p.depth_m.toFixed(2) : '—'} m</div>
+                <div><b>Probability:</b> ${p.probability != null ? (p.probability * 100).toFixed(0) + '%' : '—'}</div>
+                <div><b>Recorded:</b> ${p.recorded_at ? new Date(p.recorded_at).toLocaleString() : '—'}</div>
+              </div>
+            `);
+          },
+        }).addTo(historyLayerRef.current);
+      } catch (e) {
+        console.error('Failed to fetch inundation history', e);
+      }
+    };
+    fetchHistory();
+  }, [historyOn, historyDays]);
+
   /* ── UI helpers ─────────────────────────────────────────────────────── */
   const frameTime = radarFrames[frameIdx]
     ? new Date(radarFrames[frameIdx].time * 1000)
@@ -477,6 +571,8 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
               { label: 'Western Disturbances', on: wdOn, set: setWdOn, count: wdData?.count ?? 0 },
               { label: 'Flood Zones', on: zonesOn, set: setZonesOn },
               { label: 'Inundation', on: inundationOn, set: setInundationOn },
+              { label: 'Jal Shakti / CWC Gauges', on: gaugesOn, set: setGaugesOn, count: gaugeCount },
+              { label: 'Flood History', on: historyOn, set: setHistoryOn },
             ].map(o => (
               <label key={o.label} className="ze-toggle">
                 <input type="checkbox" checked={o.on} onChange={e => o.set(e.target.checked)} />
@@ -484,6 +580,21 @@ export default function MapComponent({ onWardSelect, selectedWard, wards = [], l
                 {o.count > 0 && <span className="ze-count">{o.count}</span>}
               </label>
             ))}
+
+            {historyOn && (
+              <div className="ze-history-range">
+                <span className="ze-history-label">Range:</span>
+                {[1, 7, 30].map(d => (
+                  <button
+                    key={d}
+                    className={`ze-range-btn ${historyDays === d ? 'active' : ''}`}
+                    onClick={() => setHistoryDays(d)}
+                  >
+                    {d === 1 ? '24h' : `${d}d`}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="ze-panel-section ze-ward-section">

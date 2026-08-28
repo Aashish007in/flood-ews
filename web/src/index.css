@@ -1121,4 +1121,145 @@ body {
     max-width: 90%;
     font-size: 11px;
   }
+
+  .cap-alert-banner {
+    max-width: 88%;
+    font-size: 11px;
+  }
+}
+
+/* ── CAP emergency alert banner ──────────────────────────────────────────── */
+
+.cap-alert-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000; /* sits above Leaflet panes (~700), dashboard (1200) and cyclone banner (1150) */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #ffffff;
+  color: #111111;
+  padding: 7px 14px 7px 10px;
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.2);
+  max-width: 70%;
+  white-space: nowrap;
+  overflow: hidden;
+  animation: cap-banner-in 0.3s ease-out;
+}
+
+@keyframes cap-banner-in {
+  from {
+    transform: translateX(-50%) translateY(-12px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+  }
+}
+
+.cap-triangle-wrap {
+  position: relative;
+  width: 24px;
+  height: 21px;
+  flex: none;
+}
+
+.cap-triangle {
+  position: absolute;
+  inset: 0;
+  background: #facc15;
+  clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+}
+
+.cap-siren {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  font-size: 11px;
+  line-height: 1;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.4));
+}
+
+.cap-headline {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #000000;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Jal Shakti / CWC gauge tooltips ────────────────────────────────────── */
+
+.gauge-tooltip-wrap {
+  background: rgba(15, 17, 23, 0.96);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  padding: 9px 12px;
+}
+
+.gauge-tooltip-wrap::before {
+  display: none;
+}
+
+.gauge-tooltip h4 {
+  font-size: 13px;
+  margin: 0 0 4px;
+}
+
+.gauge-tooltip div {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.gauge-status {
+  margin-top: 4px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+/* ── History date-range selector ────────────────────────────────────────── */
+
+.ze-history-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 2px 26px;
+}
+
+.ze-history-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ze-range-btn {
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ze-range-btn:hover {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.ze-range-btn.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
 }
