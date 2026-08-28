@@ -1,0 +1,30 @@
+name: Scheduled Weather Ingestion
+
+# Runs the ingestor once, on a schedule — 100% free using GitHub Actions.
+# Data flows into the cloud Postgres (Neon/Supabase) that the API reads.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *" # every 30 minutes
+  workflow_dispatch: # allows manual "Run workflow" button
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r ingestor/requirements.txt
+
+      - name: Run ingestion (one-shot)
+        working-directory: ingestor
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python main.py --once

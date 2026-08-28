@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: flood-postgres
+    environment:
+      POSTGRES_DB: flood_ews
+      POSTGRES_USER: flood
+      POSTGRES_PASSWORD: changeme123
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flood -d flood_ews"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - flood-net
+
+  ingestor:
+    build: ./ingestor
+    container_name: flood-ingestor
+    environment:
+      DATABASE_URL: postgresql://flood:changeme123@postgres:5432/flood_ews
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - flood-net
+
+  api:
+    build: ./api
+    container_name: flood-api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://flood:changeme123@postgres:5432/flood_ews
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - flood-net
+
+  web:
+    build: ./web
+    container_name: flood-web
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - flood-net
+
+  jasmin:
+    image: jookies/jasmin
+    container_name: flood-jasmin
+    ports:
+      - "2775:2775"
+      - "8990:8990"
+      - "1401:1401"
+    restart: unless-stopped
+    networks:
+      - flood-net
+
+  alerts:
+    build: ./alerts
+    container_name: flood-alerts
+    environment:
+      DATABASE_URL: postgresql://flood:changeme123@postgres:5432/flood_ews
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - flood-net
+
+volumes:
+  pgdata:
+
+networks:
+  flood-net:
+    driver: bridge
