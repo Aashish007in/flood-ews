@@ -259,11 +259,15 @@ async def get_forecast(zone_name: str):
         "timezone": "auto"
     }
     
-    async with httpx.AsyncClient() as client:
-        resp = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail="Upstream API error")
-        data = resp.json()
+    try:
+        # TIMEOUT ADDED HERE to prevent 502 server hangs
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail="Upstream API error")
+            data = resp.json()
+    except httpx.RequestError:
+        raise HTTPException(status_code=504, detail="Upstream API timeout")
         
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
@@ -585,4 +589,44 @@ async def get_inundation_history():
 @app.get("/api/alerts/stats")
 async def get_alerts_stats():
     return JSONResponse(content={"types": [], "ward_counts": []})
+
+
+# ── GET /api/mock-cap → Common Alerting Protocol Generator ───────────────────
+@app.get("/api/mock-cap")
+def generate_mock_cap():
+    from fastapi import Response  # Imported here to avoid header conflicts
+
+    now = datetime.now(timezone.utc)
+    expiry = now + timedelta(hours=3)
+
+    time_str = now.isoformat(timespec='seconds')
+    expiry_str = expiry.isoformat(timespec='seconds')
+
+    cap_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+  <identifier>MOCK-FLOOD-{now.strftime('%Y%m%d%H%M%S')}</identifier>
+  <sender>mock-agency@floodguard.ai</sender>
+  <sent>{time_str}</sent>
+  <status>Exercise</status>
+  <msgType>Alert</msgType>
+  <scope>Public</scope>
+  <info>
+    <category>Met</category>
+    <event>Severe Flood Warning</event>
+    <responseType>Evacuate</responseType>
+    <urgency>Immediate</urgency>
+    <severity>Severe</severity>
+    <certainty>Observed</certainty>
+    <expires>{expiry_str}</expires>
+    <headline>Evacuate Immediately: River breaching banks</headline>
+    <description>Heavy continuous rainfall has caused critical river overflow. Imminent flooding of residential areas.</description>
+    <instruction>Move to higher ground immediately. Do not drive through flooded roads.</instruction>
+    <area>
+      <areaDesc>Northern District Floodplain</areaDesc>
+      <polygon>13.2,80.1 13.3,80.2 13.2,80.3 13.1,80.2 13.2,80.1</polygon>
+    </area>
+  </info>
+</alert>"""
+
+    return Response(content=cap_xml, media_type="application/xml")
 
